@@ -1,0 +1,151 @@
+module simpleOps_m
+  implicit none  
+contains
+
+  attributes(global) subroutine kernelShuffle()
+    integer :: i, j, index, delta
+    double precision :: value
+    double precision, shared :: sharedArray(32)
+    
+    i=threadIdx%x
+    j=threadIdx%y
+    
+    do index = 0,3
+
+      delta = index*8
+
+      value = i * 0.1d0
+      value = value + __shfl_down(value, 16)
+      value = value + __shfl_down(value, 8)
+      value = value + __shfl_down(value, 4)
+      value = value + __shfl_down(value, 2)
+      value = value + __shfl_down(value, 1)
+
+      if(i.eq.1) sharedArray(j+delta) = value
+    enddo
+
+    call syncthreads()    
+
+    if(j.eq.1) then
+      value = sharedArray(i)
+      value = value + __shfl_down(value, 16)
+      value = value + __shfl_down(value, 8)
+      value = value + __shfl_down(value, 4)
+      value = value + __shfl_down(value, 2)
+      value = value + __shfl_down(value, 1)
+    endif
+
+    if(i.eq.1 .and. j.eq.1) print *, 'only shfl: ',value
+    
+  end subroutine kernelShuffle
+  
+  attributes(global) subroutine kernelShMem()
+    integer :: i, j, index, delta
+    
+    double precision, shared :: sharedArray(32,8)
+    
+    i=threadIdx%x
+    j=threadIdx%y
+
+    sharedArray(i,j) = 0.0d0
+    do index=0,3      
+      sharedArray(i,j) = sharedArray(i,j) + i * 0.1d0
+    end do
+
+    call syncthreads()
+    if(j.le.4) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i,j+4)
+    call syncthreads()
+    if(j.le.2) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i,j+2)
+    call syncthreads()
+    if(j.le.1) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i,j+1)
+    call syncthreads()
+
+    !if(i.eq.32 .and. j.le.1) print *,sharedArray(i,j)
+
+    if(j.eq.1) then
+      if(i.le.16) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i+16,j)
+      call syncwarp(activemask())
+      if(i.le.8) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i+8,j)
+      call syncwarp(activemask())
+      if(i.le.4) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i+4,j)
+      call syncwarp(activemask())
+      if(i.le.2) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i+2,j)
+      call syncwarp(activemask())
+      if(i.le.1) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i+1,j)
+    endif
+
+    if(i.eq.1 .and. j.eq.1) print *, 'only sh mem: ',sharedArray(i,j)
+  
+  end subroutine kernelShMem
+
+  attributes(global) subroutine kernelHybrid()
+    integer :: i, j, index, delta
+    double precision :: value
+    double precision, shared :: sharedArray(32,8)
+    
+    i=threadIdx%x
+    j=threadIdx%y
+    
+    sharedArray(i,j) = 0.0d0
+    do index=0,3      
+      sharedArray(i,j) = sharedArray(i,j) + i * 0.1d0
+    end do
+
+    call syncthreads()
+    if(j.le.4) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i,j+4)
+    call syncthreads()
+    if(j.le.2) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i,j+2)
+    call syncthreads()
+    if(j.le.1) sharedArray(i,j) = sharedArray(i,j) + sharedArray(i,j+1)
+    call syncthreads()    
+
+    if(j.eq.1) then
+      value = sharedArray(i,j)
+      value = value + __shfl_down(value, 16)
+      value = value + __shfl_down(value, 8)
+      value = value + __shfl_down(value, 4)
+      value = value + __shfl_down(value, 2)
+      value = value + __shfl_down(value, 1)
+    endif
+
+    if(i.eq.1 .and. j.eq.1) print *, 'hybrid: ',value
+  
+  end subroutine kernelHybrid
+
+end module simpleOps_m
+
+
+program Test  
+  use cudafor
+  use simpleOps_m
+  implicit none  
+  
+  integer :: ierrSync,ierrAsync, NGauss = 32
+  type(dim3) :: dimGrid, dimBlock
+  
+  dimGrid=dim3(1,1,1)
+  dimBlock=dim3(NGauss,NGauss/4,1)  
+  
+  call kernelShuffle<<<dimGrid,dimBlock>>>()  
+  
+  ierrSync= cudaGetLastError()
+  ierrAsync= cudaDeviceSynchronize()
+  if(ierrSync /= cudaSuccess) write(*,*) 'Sync kernel error: ' , cudaGetErrorString(ierrSync)
+  if(ierrAsync /= cudaSuccess) write(*,*) 'Async kernel error : ', cudaGetErrorString(ierrAsync)  
+
+  call kernelShMem<<<dimGrid,dimBlock>>>()
+
+  ierrSync= cudaGetLastError()
+  ierrAsync= cudaDeviceSynchronize()
+  if(ierrSync /= cudaSuccess) write(*,*) 'Sync kernel error: ' , cudaGetErrorString(ierrSync)
+  if(ierrAsync /= cudaSuccess) write(*,*) 'Async kernel error : ', cudaGetErrorString(ierrAsync)
+
+  call kernelHybrid<<<dimGrid,dimBlock>>>()
+
+  ierrSync= cudaGetLastError()
+  ierrAsync= cudaDeviceSynchronize()
+  if(ierrSync /= cudaSuccess) write(*,*) 'Sync kernel error: ' , cudaGetErrorString(ierrSync)
+  if(ierrAsync /= cudaSuccess) write(*,*) 'Async kernel error : ', cudaGetErrorString(ierrAsync)
+
+end program Test
+
